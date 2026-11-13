@@ -57,7 +57,7 @@ st.markdown(
         background: var(--panel); border-right: 1px solid var(--line);
         min-width: 256px; max-width: 256px;
     }
-    [data-testid="stSidebarUserContent"] {padding: 1.4rem 0.8rem;}
+    [data-testid="stSidebarUserContent"] {padding: 1.4rem 0.8rem 120px;}
     .brand {font-family: var(--serif); font-size: 1.45rem; color: var(--text); line-height: 1.1; padding: 0 0.5rem;}
     .brand-sub {font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.14em; color: var(--faint); padding: 0.2rem 0.5rem 1.2rem;}
     .side-label {
@@ -84,6 +84,26 @@ st.markdown(
     [data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"]::after {
         content: "●"; position: absolute; right: 12px; top: 50%; transform: translateY(-50%); font-size: 0.5rem; color: #ddd;
     }
+    /* Manage models (install / delete) */
+    [data-testid="stSidebar"] [data-testid="stExpander"] {
+        border: 1px solid var(--line); border-radius: 8px; background: transparent; margin-top: 0.8rem;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary {font-size: 0.85rem; color: #d4d4d4;}
+    [data-testid="stSidebar"] [data-testid="stForm"] {border: none; padding: 0;}
+    [data-testid="stSidebar"] [data-testid="stExpander"] .stButton > button,
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stFormSubmitButton"] > button {
+        width: 100%; justify-content: center; text-align: center; background: transparent;
+        border: 1px solid var(--line2); border-radius: 8px; color: #d4d4d4; padding: 6px 12px;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] .stButton > button:hover,
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stFormSubmitButton"] > button:hover {
+        background: #151515; border-color: #3a3a3a; color: #fff;
+    }
+    [data-testid="stSidebar"] input, [data-testid="stSidebar"] [data-baseweb="select"] > div {
+        background: #121212 !important; border-color: var(--line2) !important; color: var(--text) !important;
+    }
+    .manage-note {font-size: 0.74rem; color: var(--faint); line-height: 1.4;}
+    .manage-note a {color: var(--accent);}
     .st-key-sidefoot {position: fixed; bottom: 18px; left: 0; width: 256px; padding: 0 22px;}
     .running {font-size: 0.85rem; color: #d4d4d4;}
     .running i {display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 8px;}
@@ -140,10 +160,16 @@ st.markdown(
 
     /* Right info panel */
     .st-key-infopanel {
-        position: fixed; top: 64px; right: 0; bottom: 0; width: 280px; z-index: 40;
-        padding: 22px 24px; overflow-y: auto; background: var(--bg); border-left: 1px solid var(--line);
+        position: fixed; top: 64px; right: 0; bottom: 0; width: 280px; z-index: 1000; box-sizing: border-box;
+        padding: 22px 24px 56px; overflow-y: auto; background: var(--bg); border-left: 1px solid var(--line);
     }
-    .mi-label {font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.14em; color: var(--faint); margin-bottom: 6px;}
+    .st-key-infopanel [data-testid="stVerticalBlock"] {gap: 0.55rem;}
+    .st-key-infopanel [data-testid="stElementContainer"], .st-key-infopanel [data-testid="stMarkdownContainer"] {
+        width: 100%; max-width: 100%;
+    }
+    .st-key-infopanel textarea {min-height: 120px; resize: none;}
+    .mi-label {font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.14em; color: var(--faint); margin-bottom: 2px;}
+    .mi-label.sec {margin-top: 1.1rem;}
     .mi-title {font-family: var(--serif); font-size: 1.5rem; color: var(--text); word-break: break-word;}
     .mi-sub {font-family: var(--serif); color: var(--muted); margin: 4px 0 14px;}
     .mi-row {
@@ -151,7 +177,7 @@ st.markdown(
         font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.1em; color: var(--faint);
     }
     .mi-row b {color: var(--text); font-weight: 600; letter-spacing: 0.02em; text-align: right; word-break: break-all;}
-    .mi-note {border-left: 2px solid var(--line2); padding-left: 12px; color: var(--muted); font-size: 0.85rem; margin: 14px 0;}
+    .mi-note {border-left: 2px solid var(--line2); padding-left: 12px; color: var(--muted); font-size: 0.85rem; margin: 6px 0 0;}
     .st-key-infopanel [data-baseweb="select"] > div, .st-key-infopanel textarea {
         background: #121212 !important; border-color: var(--line2) !important; color: var(--text) !important;
     }
@@ -308,6 +334,34 @@ def select_model(name):
     st.session_state.selected_model = name
 
 
+def normalize_model_name(name):
+    """Ollama lists untagged models as ':latest', so match that."""
+    name = name.strip()
+    return name if ":" in name else f"{name}:latest"
+
+
+def pull_model(name, bar, status):
+    """Download a model from Ollama, updating a progress bar as it goes."""
+    for p in ollama.pull(name, stream=True):
+        text = field(p, "status") or ""
+        total = field(p, "total")
+        done = field(p, "completed")
+        if total and done is not None:
+            bar.progress(min(done / total, 1.0), text=text)
+        else:
+            status.caption(text)
+
+
+def delete_model(name):
+    """Runs as a button callback, so it can also reset the confirm checkbox."""
+    try:
+        ollama.delete(name)
+        st.session_state.flash = f"Deleted {name}"
+    except Exception as e:
+        st.session_state.flash = f"Couldn't delete {name}: {e}"
+    st.session_state.delete_confirm = False
+
+
 # --- SESSION STATE ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -326,6 +380,10 @@ active = st.session_state.selected_model or "llama3"
 active_info = next((m for m in infos if m["name"] == active), {})
 
 # --- LEFT SIDEBAR: BRAND + MODEL LIST ---
+flash = st.session_state.pop("flash", None)
+if flash:
+    st.toast(flash)
+
 with st.sidebar:
     st.markdown(
         '<div class="brand">Local Sandbox</div><div class="brand-sub">LOCAL INFERENCE</div>',
@@ -347,6 +405,53 @@ with st.sidebar:
             args=(m["name"],),
             use_container_width=True,
         )
+    with st.expander("➕ Manage models"):
+        st.markdown('<div class="side-label" style="padding:0 0 0.2rem">INSTALL</div>', unsafe_allow_html=True)
+        with st.form("pull_form", clear_on_submit=True):
+            new_model = st.text_input(
+                "Model name", placeholder="e.g. llama3.2:3b", label_visibility="collapsed"
+            )
+            pull_clicked = st.form_submit_button("Install model")
+        st.markdown(
+            '<div class="manage-note">Browse names at '
+            '<a href="https://ollama.com/library" target="_blank">ollama.com/library</a>. '
+            "Downloads can be several GB, so keep this tab open until it finishes.</div>",
+            unsafe_allow_html=True,
+        )
+        pulled = None
+        if pull_clicked and new_model.strip():
+            target = normalize_model_name(new_model)
+            bar = st.progress(0.0, text=f"Starting {target}...")
+            status = st.empty()
+            try:
+                pull_model(target, bar, status)
+                pulled = target
+            except Exception as e:
+                bar.empty()
+                st.error(f"Couldn't install {target}: {e}")
+        if pulled:
+            st.session_state.selected_model = pulled
+            st.session_state.flash = f"Installed {pulled}"
+            st.rerun()
+
+        st.markdown(
+            '<div class="side-label" style="padding:0.8rem 0 0.2rem">DELETE</div>', unsafe_allow_html=True
+        )
+        if names:
+            to_delete = st.selectbox(
+                "Model to delete", options=names, label_visibility="collapsed", key="delete_choice"
+            )
+            confirm = st.checkbox(f"Yes, delete {to_delete}", key="delete_confirm")
+            st.button(
+                "Delete model",
+                disabled=not confirm,
+                on_click=delete_model,
+                args=(to_delete,),
+                key="delete_button",
+            )
+        else:
+            st.caption("No models installed.")
+
     with st.container(key="sidefoot"):
         st.markdown(
             '<div class="running"><i></i>Running locally</div>'
@@ -381,13 +486,13 @@ with st.container(key="infopanel"):
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="mi-label" style="margin-top:18px">VOICE</div>', unsafe_allow_html=True)
+    st.markdown('<div class="mi-label sec">VOICE</div>', unsafe_allow_html=True)
     tts_enabled = st.toggle("Speak replies", value=True)
     tts_voice = st.selectbox("Voice", options=TTS_VOICES, index=0, label_visibility="collapsed")
     if st.button("🔊 Replay last reply", disabled=not st.session_state.last_wav):
         play_hidden(st.session_state.last_wav)
 
-    st.markdown('<div class="mi-label" style="margin-top:18px">SYSTEM PROMPT</div>', unsafe_allow_html=True)
+    st.markdown('<div class="mi-label sec">SYSTEM PROMPT</div>', unsafe_allow_html=True)
     system_prompt = st.text_area(
         "System prompt",
         value="You are a helpful AI assistant running in a local sandbox.",

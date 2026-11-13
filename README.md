@@ -2,7 +2,7 @@
 
 A sandbox to run LLMs locally and privately. A Streamlit web UI for your Ollama models with:
 
-- **Model list** in the sidebar, pulled from whatever you have installed in Ollama
+- **Model list** in the sidebar, pulled from whatever you have installed in Ollama, with install and delete built in
 - **Voice input** (speech-to-text) using the mic in the chat bar, transcribed locally with faster-whisper
 - **Voice replies** (text-to-speech) generated locally with Kokoro
 - **Conversation memory** and an editable system prompt
@@ -66,6 +66,9 @@ Streamlit opens at `http://localhost:8501`. Allow microphone access when the bro
 ## Using it
 
 - Click a model in the left sidebar to switch to it.
+- Open **Manage models** in the sidebar to install or delete models:
+  - **Install:** type a model name such as `llama3.2:3b` and click Install. A progress bar shows the download. Names are listed at [ollama.com/library](https://ollama.com/library). Keep the tab open until it finishes, since clicking elsewhere interrupts the download.
+  - **Delete:** pick a model, tick the confirmation box, and click Delete.
 - Type and press Enter to send, Shift + Enter for a new line.
 - Click the mic in the chat bar to dictate. The transcription is sent automatically.
 - Use the right panel to turn spoken replies on or off, pick a voice, replay the last reply, or edit the system prompt.
