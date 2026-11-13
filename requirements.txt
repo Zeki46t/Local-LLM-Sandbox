@@ -1,0 +1,6 @@
+streamlit>=1.40
+ollama
+requests
+numpy
+faster-whisper
+soundfile
