@@ -3,6 +3,8 @@ import html as htmllib
 import inspect
 import io
 import re
+import shutil
+import subprocess
 import wave
 
 import numpy as np
@@ -19,6 +21,16 @@ st.set_page_config(
 
 TTS_SAMPLE_RATE = 24000
 TTS_VOICES = ["af_heart", "af_bella", "af_nicole", "bf_emma", "am_michael", "am_fenrir"]
+
+# Uploads: images go to vision models, audio is transcribed, everything else is read as text
+IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
+AUDIO_EXTS = ["mp3", "wav", "m4a", "ogg", "flac", "webm", "aac", "opus"]
+DOC_EXTS = [
+    "pdf", "docx", "txt", "md", "csv", "tsv", "json", "xml", "yaml", "yml", "toml", "ini", "log",
+    "py", "js", "ts", "html", "css", "sql", "sh", "c", "cpp", "h", "java", "go", "rs",
+]
+UPLOAD_EXTS = IMAGE_EXTS + AUDIO_EXTS + DOC_EXTS
+CONTEXT_SIZES = [4096, 8192, 16384, 32768]
 
 # --- STYLING ---
 st.markdown(
@@ -140,6 +152,8 @@ st.markdown(
         padding: 10px 16px; width: fit-content; max-width: 80%; margin-left: auto;
     }
     [class*="st-key-ubub-"] p {margin: 0; color: var(--text);}
+    [class*="st-key-ubub-"] code {background: #222; color: #cfcfcf; font-size: 0.78rem; padding: 2px 7px; border-radius: 6px;}
+    [class*="st-key-ubub-"] img {border-radius: 8px;}
     [class*="st-key-arow-"] [data-testid="stMarkdownContainer"] p,
     [class*="st-key-arow-"] [data-testid="stMarkdownContainer"] li {
         font-family: var(--serif); font-size: 1.12rem; line-height: 1.65; color: var(--text);
@@ -245,10 +259,11 @@ def load_whisper():
     return WhisperModel("base", device="cpu", compute_type="int8")
 
 
-def transcribe(audio_file):
-    """Decode the WAV recording directly, so PyAV is never used."""
-    model = load_whisper()
-    with wave.open(io.BytesIO(audio_file.getvalue()), "rb") as wf:
+def wav_to_float(raw):
+    """Decode WAV bytes to mono 16 kHz float32, so PyAV is never used for the mic."""
+    with wave.open(io.BytesIO(raw), "rb") as wf:
+        if wf.getsampwidth() != 2:
+            raise wave.Error("only 16-bit WAV is read directly")
         rate = wf.getframerate()
         channels = wf.getnchannels()
         frames = wf.readframes(wf.getnframes())
@@ -260,8 +275,125 @@ def transcribe(audio_file):
         data = np.interp(
             np.linspace(0, len(data) - 1, n), np.arange(len(data)), data
         ).astype(np.float32)
-    segments, _ = model.transcribe(data)
+    return data
+
+
+def decode_audio_bytes(raw):
+    """WAV is read directly; mp3, m4a, ogg and the rest go through ffmpeg if it's installed."""
+    try:
+        return wav_to_float(raw)
+    except (wave.Error, EOFError):
+        pass
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError(
+            "only WAV audio can be read without ffmpeg. Install it (Fedora: sudo dnf install ffmpeg-free) "
+            "or upload a WAV file."
+        )
+    proc = subprocess.run(
+        [ffmpeg, "-v", "error", "-i", "pipe:0", "-f", "s16le", "-ac", "1", "-ar", "16000", "pipe:1"],
+        input=raw, capture_output=True,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        raise RuntimeError("ffmpeg couldn't read that audio file: " + proc.stderr.decode(errors="replace")[:200])
+    return np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def transcribe_bytes(raw):
+    model = load_whisper()
+    segments, _ = model.transcribe(decode_audio_bytes(raw))
     return " ".join(seg.text.strip() for seg in segments).strip()
+
+
+def transcribe(audio_file):
+    return transcribe_bytes(audio_file.getvalue())
+
+
+def file_ext(name):
+    return name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+
+def prepare_image(raw, max_side=1280):
+    """Shrink big photos so vision models answer faster. Falls back to the original bytes."""
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        img.thumbnail((max_side, max_side))
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=90)
+        return buf.getvalue()
+    except Exception:
+        return raw
+
+
+def extract_text(name, raw):
+    """Pull readable text out of a PDF, Word file or plain text/code file."""
+    ext = file_ext(name)
+    if ext == "pdf":
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            raise RuntimeError("PDF support needs pypdf (pip install pypdf)")
+        reader = PdfReader(io.BytesIO(raw))
+        return "\n\n".join((page.extract_text() or "") for page in reader.pages).strip()
+    if ext == "docx":
+        try:
+            import docx
+        except ImportError:
+            raise RuntimeError("Word support needs python-docx (pip install python-docx)")
+        document = docx.Document(io.BytesIO(raw))
+        return "\n".join(p.text for p in document.paragraphs).strip()
+    return raw.decode("utf-8", errors="replace").strip()
+
+
+def shorten(text, limit):
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...[truncated to fit the context window]"
+
+
+def process_uploads(files, num_ctx):
+    """Turn uploaded files into (attachments, images, extra_text, errors) for the model."""
+    attachments, images, parts, errors = [], [], [], []
+    text_files = [f for f in files if file_ext(f.name) not in IMAGE_EXTS]
+    # Roughly 2.5 characters per token, spread across the text-based files
+    per_file = max(2000, int(num_ctx * 2.5) // max(1, len(text_files)))
+    for f in files:
+        raw = f.getvalue()
+        ext = file_ext(f.name)
+        try:
+            if ext in IMAGE_EXTS:
+                images.append(prepare_image(raw))
+                attachments.append({"name": f.name, "kind": "image"})
+            elif ext in AUDIO_EXTS:
+                text = transcribe_bytes(raw)
+                if not text:
+                    errors.append(f"{f.name}: no speech found")
+                    continue
+                parts.append(f'[Transcript of audio file "{f.name}"]\n{shorten(text, per_file)}')
+                attachments.append({"name": f.name, "kind": "audio"})
+            else:
+                text = extract_text(f.name, raw)
+                if not text:
+                    errors.append(f"{f.name}: no readable text found")
+                    continue
+                parts.append(f'[Attached file "{f.name}"]\n```\n{shorten(text, per_file)}\n```')
+                attachments.append({"name": f.name, "kind": "file"})
+        except Exception as e:
+            errors.append(f"{f.name}: {e}")
+    return attachments, images, "\n\n".join(parts), errors
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def has_vision(model_name):
+    """True or False if Ollama reports it, None if it can't tell."""
+    try:
+        caps = field(ollama.show(model_name), "capabilities")
+        if caps:
+            return "vision" in caps
+    except Exception:
+        pass
+    return None
 
 
 @st.cache_resource
@@ -317,11 +449,20 @@ def model_label(name):
     return esc(name.split(":")[0].upper())
 
 
-def render_user(i, text):
+ATTACH_ICONS = {"image": "🖼️", "audio": "🎧", "file": "📄"}
+
+
+def render_user(i, text, attachments=None, images=None):
     with st.container(key=f"urow-{i}"):
         st.markdown('<div class="lbl-you">YOU</div>', unsafe_allow_html=True)
         with st.container(key=f"ubub-{i}"):
-            st.markdown(text)
+            if text:
+                st.markdown(text)
+            if attachments:
+                chips = "  ".join(f"`{ATTACH_ICONS.get(a['kind'], '📎')} {a['name']}`" for a in attachments)
+                st.markdown(chips)
+            for img in images or []:
+                st.image(img, width=240)
 
 
 def render_assistant(i, text, model):
@@ -477,6 +618,9 @@ with st.container(key="infopanel"):
         rows.append(("FORMAT", active_info["quant"]))
     if active_info.get("family"):
         rows.append(("FAMILY", active_info["family"]))
+    vision = has_vision(active)
+    if vision is not None:
+        rows.append(("IMAGES", "supported" if vision else "not supported"))
     rows_html = "".join(f'<div class="mi-row"><span>{esc(k)}</span><b>{esc(v)}</b></div>' for k, v in rows)
     st.markdown(
         '<div class="mi-label">MODEL INFO</div>'
@@ -491,6 +635,16 @@ with st.container(key="infopanel"):
     tts_voice = st.selectbox("Voice", options=TTS_VOICES, index=0, label_visibility="collapsed")
     if st.button("🔊 Replay last reply", disabled=not st.session_state.last_wav):
         play_hidden(st.session_state.last_wav)
+
+    st.markdown('<div class="mi-label sec">CONTEXT WINDOW</div>', unsafe_allow_html=True)
+    num_ctx = st.selectbox(
+        "Context window",
+        options=CONTEXT_SIZES,
+        index=1,
+        format_func=lambda n: f"{n:,} tokens",
+        label_visibility="collapsed",
+        help="How much text the model can see at once. Larger values fit bigger attached files but use more memory.",
+    )
 
     st.markdown('<div class="mi-label sec">SYSTEM PROMPT</div>', unsafe_allow_html=True)
     system_prompt = st.text_area(
@@ -527,21 +681,31 @@ with center:
 
     for i, message in enumerate(st.session_state.messages):
         if message["role"] == "user":
-            render_user(i, message["content"])
+            render_user(i, message["content"], message.get("attachments"), message.get("images"))
         else:
             render_assistant(i, message["content"], message.get("model", active))
 
-# --- INPUT (mic lives inside the chat bar when Streamlit supports it) ---
+# --- INPUT (mic and file uploads live inside the chat bar when Streamlit supports it) ---
 prompt = None
-supports_audio_input = "accept_audio" in inspect.signature(st.chat_input).parameters
+uploads = []
+chat_params = inspect.signature(st.chat_input).parameters
+supports_audio_input = "accept_audio" in chat_params
+supports_file_input = "accept_file" in chat_params
 
+chat_kwargs = {}
 if supports_audio_input:
-    submission = st.chat_input("Ask anything...", accept_audio=True, audio_sample_rate=16000)
+    chat_kwargs.update(accept_audio=True, audio_sample_rate=16000)
+if supports_file_input:
+    chat_kwargs.update(accept_file="multiple", file_type=UPLOAD_EXTS)
+
+if chat_kwargs:
+    submission = st.chat_input("Ask anything...", **chat_kwargs)
     if submission:
         if isinstance(submission, str):
             prompt = submission
         else:
             prompt = field(submission, "text")
+            uploads = list(field(submission, "files") or [])
             recording = field(submission, "audio")
             if not prompt and recording is not None:
                 with st.spinner("Transcribing..."):
@@ -549,9 +713,23 @@ if supports_audio_input:
                 if not prompt:
                     st.warning("I couldn't hear anything in that recording.")
 else:
-    # Older Streamlit: normal chat bar plus a small mic popover
-    # (run `pip install -U streamlit` to get the mic inside the chat bar)
     prompt = st.chat_input("Ask anything...")
+
+# Older Streamlit: small popovers next to the chat bar
+# (run `pip install -U streamlit` to get the mic and paperclip inside the chat bar)
+if not supports_file_input:
+    if "uploader_n" not in st.session_state:
+        st.session_state.uploader_n = 0
+    with st.popover("📎"):
+        fallback_files = st.file_uploader(
+            "Attach files, photos or audio",
+            type=UPLOAD_EXTS,
+            accept_multiple_files=True,
+            key=f"uploader-{st.session_state.uploader_n}",
+        )
+    uploads = list(fallback_files or [])
+
+if not supports_audio_input:
     with st.popover("🎤"):
         recording = st.audio_input("Record a message", label_visibility="collapsed")
     if recording is not None:
@@ -566,12 +744,47 @@ else:
                 st.warning("I couldn't hear anything in that recording.")
 
 # --- CORE LOGIC ---
-if prompt:
+if prompt or uploads:
     idx = len(st.session_state.messages)
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    text = prompt or ""
+    attachments, images, extra_text, upload_errors = [], [], "", []
+    if uploads:
+        with center, st.spinner("Reading attachments..."):
+            attachments, images, extra_text, upload_errors = process_uploads(uploads, num_ctx)
+        if not supports_file_input:
+            st.session_state.uploader_n += 1  # clears the fallback uploader after sending
+
+    # Nothing usable (every attachment failed and no text): show why and stop
+    if not text and not attachments and not images:
+        with center:
+            for err in upload_errors:
+                st.warning(f"Couldn't read {err}")
+        st.stop()
+
+    model_text = text or "Please take a look at what I attached."
+    if extra_text:
+        model_text = f"{model_text}\n\n{extra_text}"
+    vision_ok = has_vision(active) is not False
+    if images and not vision_ok:
+        model_text += f"\n\n[{len(images)} image(s) were attached, but this model can't view images.]"
+
+    st.session_state.messages.append({
+        "role": "user",
+        "content": text,
+        "model_content": model_text,
+        "attachments": attachments,
+        "images": images,
+    })
 
     with center:
-        render_user(idx, prompt)
+        render_user(idx, text, attachments, images)
+        for err in upload_errors:
+            st.warning(f"Couldn't read {err}")
+        if images and not vision_ok:
+            st.warning(
+                f"{active} can't view images, so the photo was not sent. "
+                "Pick a vision model (for example llama3.2-vision, gemma3 or qwen2.5vl) from Manage models."
+            )
 
         arow = st.container(key=f"arow-{idx + 1}")
         with arow:
@@ -580,9 +793,19 @@ if prompt:
 
         full_response = ""
         try:
-            history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+            history = []
+            for m in st.session_state.messages:
+                entry = {"role": m["role"], "content": m.get("model_content", m["content"])}
+                if m.get("images") and vision_ok:
+                    entry["images"] = m["images"]
+                history.append(entry)
             chat_messages = [{"role": "system", "content": system_prompt}] + history
-            stream = ollama.chat(model=active, messages=chat_messages, stream=True)
+            stream = ollama.chat(
+                model=active,
+                messages=chat_messages,
+                stream=True,
+                options={"num_ctx": num_ctx},
+            )
             for chunk in stream:
                 full_response += chunk['message']['content']
                 response_placeholder.markdown(full_response + "▌")
@@ -593,6 +816,8 @@ if prompt:
         except Exception as e:
             with arow:
                 st.error(f"Error connecting to Ollama: {e}")
+                if images:
+                    st.caption("If this model can't handle images, pick a vision model such as llama3.2-vision or gemma3.")
 
         # Speak the reply with no visible player
         if tts_enabled and full_response:

@@ -4,3 +4,5 @@ requests
 numpy
 faster-whisper
 soundfile
+pypdf
+python-docx

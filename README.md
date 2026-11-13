@@ -4,6 +4,7 @@ A sandbox to run LLMs locally and privately. A Streamlit web UI for your Ollama 
 
 - **Model list** in the sidebar, pulled from whatever you have installed in Ollama, with install and delete built in
 - **Voice input** (speech-to-text) using the mic in the chat bar, transcribed locally with faster-whisper
+- **Uploads** with the paperclip in the chat bar: documents, code, audio files and photos
 - **Voice replies** (text-to-speech) generated locally with Kokoro
 - **Conversation memory** and an editable system prompt
 - A dark three-panel layout: models on the left, chat in the middle, model info and voice settings on the right
@@ -15,13 +16,14 @@ Everything runs on your own machine. Prompts and recordings never leave it.
 - Python **3.12** (Kokoro depends on `spacy`, which has no prebuilt packages for Python 3.13 or newer)
 - [Ollama](https://ollama.com) with at least one model pulled
 - `espeak-ng` (used by Kokoro for speech)
+- `ffmpeg` (optional, only needed to upload audio other than WAV, such as mp3 or m4a)
 - A browser with microphone access
 
 ## Install on Fedora
 
 ```bash
 # System packages
-sudo dnf install espeak-ng python3.12 gcc gcc-c++
+sudo dnf install espeak-ng python3.12 gcc gcc-c++ ffmpeg-free
 
 # Ollama and a model
 curl -fsSL https://ollama.com/install.sh | sh
@@ -71,6 +73,11 @@ Streamlit opens at `http://localhost:8501`. Allow microphone access when the bro
   - **Delete:** pick a model, tick the confirmation box, and click Delete.
 - Type and press Enter to send, Shift + Enter for a new line.
 - Click the mic in the chat bar to dictate. The transcription is sent automatically.
+- Click the paperclip in the chat bar to attach one or more files, then type a question (or just send them):
+  - **Documents and code** (pdf, docx, txt, md, csv, json, py, js and more): the text is read and sent to the model along with your message.
+  - **Audio** (wav, mp3, m4a, ogg, flac and more): transcribed locally with Whisper, and the transcript is sent to the model. Models can't hear audio directly. Anything other than WAV needs `ffmpeg`.
+  - **Photos** (png, jpg, webp, gif): sent to the model as images. This only works with a vision model, such as `llama3.2-vision`, `gemma3` or `qwen2.5vl`. The right panel shows whether the active model supports images.
+- Big files are trimmed to fit the **Context window** setting in the right panel. Raise it to fit more, at the cost of memory.
 - Use the right panel to turn spoken replies on or off, pick a voice, replay the last reply, or edit the system prompt.
 - **New chat** clears the conversation.
 
@@ -102,3 +109,12 @@ Check that `espeak-ng` and `kokoro` are installed. The app shows a warning under
 
 **Changes not showing after an update**
 Stop Streamlit with Ctrl+C and start it again. A browser refresh does not reload Python libraries.
+
+**Audio upload fails with "only WAV audio can be read without ffmpeg"**
+Install ffmpeg (`sudo dnf install ffmpeg-free` on Fedora, `sudo apt install ffmpeg` on Ubuntu), or upload a WAV file.
+
+**"This model can't view images"**
+Pull a vision model from **Manage models**, for example `llama3.2-vision`, and select it.
+
+**PDF or Word upload says a package is missing**
+Run `python3.12 -m pip install --user pypdf python-docx`.
