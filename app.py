@@ -2,10 +2,16 @@ import base64
 import html as htmllib
 import inspect
 import io
+import json
+import os
 import re
 import shutil
+import signal
 import subprocess
+import uuid
 import wave
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import requests
@@ -31,6 +37,12 @@ DOC_EXTS = [
 ]
 UPLOAD_EXTS = IMAGE_EXTS + AUDIO_EXTS + DOC_EXTS
 CONTEXT_SIZES = [4096, 8192, 16384, 32768]
+
+# Saved chats live here (set LLM_SANDBOX_DATA to put them somewhere else)
+DATA_DIR = Path(os.environ.get("LLM_SANDBOX_DATA", Path.home() / ".local" / "share" / "local-llm-sandbox"))
+CHAT_DIR = DATA_DIR / "chats"
+INDEX_FILE = DATA_DIR / "index.json"
+CHAT_ID_PATTERN = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
 
 # --- STYLING ---
 st.markdown(
@@ -114,6 +126,15 @@ st.markdown(
     [data-testid="stSidebar"] input, [data-testid="stSidebar"] [data-baseweb="select"] > div {
         background: #121212 !important; border-color: var(--line2) !important; color: var(--text) !important;
     }
+    [class*="st-key-chatdel-"] button {
+        justify-content: center !important; padding: 4px 0 !important; color: var(--faint) !important; min-height: 0;
+    }
+    [class*="st-key-chatdel-"] button:hover {color: #f87171 !important;}
+    .st-key-stopapp button {
+        background: transparent !important; border: none !important; color: var(--muted) !important;
+        padding: 0 !important; margin-top: 6px; text-decoration: underline; font-size: 0.8rem; min-height: 0;
+    }
+    .st-key-stopapp button:hover {color: #f87171 !important;}
     .manage-note {font-size: 0.74rem; color: var(--faint); line-height: 1.4;}
     .manage-note a {color: var(--accent);}
     .st-key-sidefoot {position: fixed; bottom: 18px; left: 0; width: 256px; padding: 0 22px;}
@@ -503,7 +524,187 @@ def delete_model(name):
     st.session_state.delete_confirm = False
 
 
+# --- SAVED CHATS (HISTORY START) ---
+def _write_json(path, data):
+    """Write atomically and keep the files private to your user."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(DATA_DIR, 0o700)
+    except OSError:
+        pass
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def messages_to_json(messages):
+    out = []
+    for m in messages:
+        item = {k: v for k, v in m.items() if k != "images"}
+        if m.get("images"):
+            item["images"] = [base64.b64encode(b).decode() for b in m["images"]]
+        out.append(item)
+    return out
+
+
+def messages_from_json(items):
+    out = []
+    for m in items:
+        m = dict(m)
+        if m.get("images"):
+            m["images"] = [base64.b64decode(s) for s in m["images"]]
+        out.append(m)
+    return out
+
+
+def rebuild_index():
+    index = {}
+    for p in CHAT_DIR.glob("*.json"):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            index[d["id"]] = {
+                "title": d.get("title", "Untitled"),
+                "updated": d.get("updated", ""),
+                "count": len(d.get("messages", [])),
+                "model": d.get("model", ""),
+            }
+        except Exception:
+            continue
+    if index:
+        try:
+            _write_json(INDEX_FILE, index)
+        except Exception:
+            pass
+    return index
+
+
+def load_index():
+    try:
+        return json.loads(INDEX_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return rebuild_index()
+
+
+def make_title(messages):
+    for m in messages:
+        if m["role"] == "user":
+            t = (m.get("content") or "").strip()
+            if not t and m.get("attachments"):
+                t = m["attachments"][0]["name"]
+            t = " ".join(t.split())
+            if t:
+                return t[:48] + ("…" if len(t) > 48 else "")
+    return "New chat"
+
+
+def save_chat():
+    """Save the current conversation to disk, if saving is switched on."""
+    if not st.session_state.get("save_history", True) or not st.session_state.messages:
+        return
+    try:
+        if not st.session_state.chat_id:
+            st.session_state.chat_id = (
+                datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+            )
+        cid = st.session_state.chat_id
+        now = datetime.now().isoformat(timespec="seconds")
+        index = load_index()
+        title = index.get(cid, {}).get("title") or make_title(st.session_state.messages)
+        data = {
+            "id": cid,
+            "title": title,
+            "updated": now,
+            "model": st.session_state.selected_model,
+            "messages": messages_to_json(st.session_state.messages),
+        }
+        _write_json(CHAT_DIR / f"{cid}.json", data)
+        index[cid] = {
+            "title": title,
+            "updated": now,
+            "count": len(st.session_state.messages),
+            "model": st.session_state.selected_model,
+        }
+        _write_json(INDEX_FILE, index)
+    except Exception as e:
+        st.session_state.flash = f"Couldn't save chat: {e}"
+
+
+def new_chat():
+    st.session_state.messages = []
+    st.session_state.chat_id = None
+    st.session_state.last_wav = None
+
+
+def open_chat(cid):
+    if not CHAT_ID_PATTERN.fullmatch(cid):
+        return
+    try:
+        data = json.loads((CHAT_DIR / f"{cid}.json").read_text(encoding="utf-8"))
+        st.session_state.messages = messages_from_json(data["messages"])
+        st.session_state.chat_id = cid
+        st.session_state.last_wav = None
+        if data.get("model"):
+            st.session_state.selected_model = data["model"]  # falls back to the first model if it's gone
+    except Exception as e:
+        st.session_state.flash = f"Couldn't open that chat: {e}"
+
+
+def delete_chat(cid):
+    if not CHAT_ID_PATTERN.fullmatch(cid):
+        return
+    try:
+        (CHAT_DIR / f"{cid}.json").unlink(missing_ok=True)
+        index = load_index()
+        index.pop(cid, None)
+        _write_json(INDEX_FILE, index)
+    except Exception as e:
+        st.session_state.flash = f"Couldn't delete that chat: {e}"
+    if st.session_state.get("chat_id") == cid:
+        new_chat()
+
+
+def md_escape(text):
+    return re.sub(r"([\\`*_{}\[\]<>#|~$])", r"\\\1", text)
+
+
+def format_when(iso):
+    try:
+        return datetime.fromisoformat(iso).strftime("%b %d, %H:%M")
+    except Exception:
+        return ""
+
+
+def render_chat_list(slot, tag):
+    """Fill the sidebar's chat list. `tag` keeps widget keys unique if it's drawn twice in one run."""
+    index = load_index()
+    items = sorted(index.items(), key=lambda kv: kv[1].get("updated", ""), reverse=True)[:25]
+    with slot.container():
+        st.markdown(
+            f'<div class="side-label"><span>CHATS</span><span>{len(index):02d}</span></div>',
+            unsafe_allow_html=True,
+        )
+        if not items:
+            st.caption("Your saved chats will show up here.")
+        for cid, meta in items:
+            c1, c2 = st.columns([6, 1], vertical_alignment="center")
+            with c1:
+                st.button(
+                    f"{md_escape(meta.get('title', 'Untitled'))}  \n`{format_when(meta.get('updated', ''))}`",
+                    key=f"chat-{cid}-{tag}",
+                    type="primary" if cid == st.session_state.chat_id else "secondary",
+                    on_click=open_chat,
+                    args=(cid,),
+                    use_container_width=True,
+                )
+            with c2:
+                st.button("✕", key=f"chatdel-{cid}-{tag}", on_click=delete_chat, args=(cid,), help="Delete this chat")
+# --- SAVED CHATS (HISTORY END) ---
+
+
 # --- SESSION STATE ---
+if "chat_id" not in st.session_state:
+    st.session_state.chat_id = None
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "selected_model" not in st.session_state:
@@ -593,12 +794,16 @@ with st.sidebar:
         else:
             st.caption("No models installed.")
 
+    chat_slot = st.empty()  # the saved-chat list is drawn here (see render_chat_list)
+
     with st.container(key="sidefoot"):
         st.markdown(
             '<div class="running"><i></i>Running locally</div>'
             '<div class="running-sub">Prompts and recordings stay on this computer.</div>',
             unsafe_allow_html=True,
         )
+        if st.button("Stop app", key="stopapp", help="Shuts down the sandbox. Open it again from your app menu."):
+            os.kill(os.getpid(), signal.SIGTERM)
 
 # --- TOP BAR ---
 status_class = "" if infos else "bad"
@@ -646,6 +851,14 @@ with st.container(key="infopanel"):
         help="How much text the model can see at once. Larger values fit bigger attached files but use more memory.",
     )
 
+    st.markdown('<div class="mi-label sec">HISTORY</div>', unsafe_allow_html=True)
+    st.toggle(
+        "Save chats on this computer",
+        value=True,
+        key="save_history",
+        help=f"Chats are stored in {DATA_DIR}. Turn this off to stop saving new messages.",
+    )
+
     st.markdown('<div class="mi-label sec">SYSTEM PROMPT</div>', unsafe_allow_html=True)
     system_prompt = st.text_area(
         "System prompt",
@@ -670,10 +883,7 @@ with center:
         )
     with head_r:
         with st.container(key="newchat"):
-            if st.button("↻ New chat"):
-                st.session_state.messages = []
-                st.session_state.last_wav = None
-                st.rerun()
+            st.button("↻ New chat", on_click=new_chat)
     st.markdown('<div class="page-rule"></div>', unsafe_allow_html=True)
 
     if not st.session_state.messages:
@@ -742,6 +952,9 @@ if not supports_audio_input:
                 prompt = spoken_text
             else:
                 st.warning("I couldn't hear anything in that recording.")
+
+# --- SAVED CHAT LIST (sidebar) ---
+render_chat_list(chat_slot, "a")
 
 # --- CORE LOGIC ---
 if prompt or uploads:
@@ -818,6 +1031,10 @@ if prompt or uploads:
                 st.error(f"Error connecting to Ollama: {e}")
                 if images:
                     st.caption("If this model can't handle images, pick a vision model such as llama3.2-vision or gemma3.")
+
+        # Save the conversation and refresh the sidebar list so the new chat shows up
+        save_chat()
+        render_chat_list(chat_slot, "b")
 
         # Speak the reply with no visible player
         if tts_enabled and full_response:

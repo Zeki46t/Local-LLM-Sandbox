@@ -6,10 +6,28 @@ A sandbox to run LLMs locally and privately. A Streamlit web UI for your Ollama 
 - **Voice input** (speech-to-text) using the mic in the chat bar, transcribed locally with faster-whisper
 - **Uploads** with the paperclip in the chat bar: documents, code, audio files and photos
 - **Voice replies** (text-to-speech) generated locally with Kokoro
-- **Conversation memory** and an editable system prompt
-- A dark three-panel layout: models on the left, chat in the middle, model info and voice settings on the right
+- **Saved chats** you can reopen or delete from the sidebar, plus an editable system prompt
+- **One-click launch** from your app menu (see below)
+- A dark three-panel layout: models and chats on the left, chat in the middle, model info and voice settings on the right
 
 Everything runs on your own machine. Prompts and recordings never leave it.
+
+## One-click app (quick start)
+
+```bash
+git clone https://github.com/Zeki46t/Local-LLM-Sandbox.git
+cd Local-LLM-Sandbox
+./install.sh --deps      # installs the packages (skip --deps if you already did the manual install below)
+```
+
+This adds **Local LLM Sandbox** to your app menu. Press the Super key, type "Local LLM", and click it. The launcher starts Ollama if it isn't running, starts the sandbox, and opens it in its own window (Chrome, Chromium, Brave or Edge) or your default browser. Clicking it again while it's running just reopens the window.
+
+- **Stop it:** click **Stop app** at the bottom of the left sidebar. Closing the window leaves the server running in the background so reopening is instant.
+- **Pin it:** while it's open, right-click its icon in the dock and choose Add to Favorites.
+- **Remove it:** `./install.sh --uninstall` (your chats and models are kept).
+- **Logs:** `~/.cache/local-llm-sandbox/streamlit.log` if something doesn't start.
+- **Different port:** set `LLM_SANDBOX_PORT` (default 8501).
+- Ollama itself still has to be installed from [ollama.com](https://ollama.com).
 
 ## Requirements
 
@@ -79,7 +97,16 @@ Streamlit opens at `http://localhost:8501`. Allow microphone access when the bro
   - **Photos** (png, jpg, webp, gif): sent to the model as images. This only works with a vision model, such as `llama3.2-vision`, `gemma3` or `qwen2.5vl`. The right panel shows whether the active model supports images.
 - Big files are trimmed to fit the **Context window** setting in the right panel. Raise it to fit more, at the cost of memory.
 - Use the right panel to turn spoken replies on or off, pick a voice, replay the last reply, or edit the system prompt.
-- **New chat** clears the conversation.
+- **New chat** starts a fresh conversation.
+
+## Saved chats
+
+Chats are saved automatically after every reply and listed under **CHATS** in the left sidebar. Click one to reopen it (it switches back to the model you used, if it's still installed). Click ✕ to delete it.
+
+- **Where:** `~/.local/share/local-llm-sandbox/` (one JSON file per chat in `chats/`, plus an `index.json`). The files are readable only by your user. Set `LLM_SANDBOX_DATA` to use a different folder.
+- **What's saved:** your messages, the model's replies, the text pulled from attached files and transcripts, and any photos you attached. Spoken replies aren't saved.
+- **Turn it off:** switch off **Save chats on this computer** under HISTORY in the right panel. New messages then aren't written to disk. Chats already saved stay until you delete them.
+- **Delete everything:** remove the `~/.local/share/local-llm-sandbox/` folder.
 
 ## Tuning
 
@@ -118,3 +145,9 @@ Pull a vision model from **Manage models**, for example `llama3.2-vision`, and s
 
 **PDF or Word upload says a package is missing**
 Run `python3.12 -m pip install --user pypdf python-docx`.
+
+**The app menu entry doesn't start anything**
+Open `~/.cache/local-llm-sandbox/streamlit.log`. The most common cause is that the packages aren't installed for Python 3.12; run `./install.sh --deps`. You can also run `./launch.sh` in a terminal to see its messages.
+
+**"Stop app" closed the window but I want it back**
+Click Local LLM Sandbox in your app menu again. Your chats are saved, so reopen the one you want from the sidebar.
