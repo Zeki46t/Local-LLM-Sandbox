@@ -22,7 +22,8 @@ fi
 if [[ "${1:-}" == "--deps" ]]; then
     echo "Installing system packages (you may be asked for your password)..."
     if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update
+        # A broken third-party repository (a 404 PPA, say) makes update exit with an error; that shouldn't stop us.
+        sudo apt-get update || echo "(apt reported a problem with one of your repositories; continuing anyway)"
         if ! sudo apt-get install -y espeak-ng python3.12 python3.12-venv ffmpeg curl build-essential; then
             echo
             echo "Couldn't install Python 3.12 from your repositories (older Pop!_OS and Ubuntu releases don't have it)."
