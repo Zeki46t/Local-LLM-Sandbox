@@ -15,11 +15,17 @@ say() {
 
 healthy() { curl -fs --max-time 2 "$1" >/dev/null 2>&1; }
 
-# Kokoro (voice) needs Python 3.12
-if command -v python3.12 >/dev/null 2>&1; then PY=python3.12; else PY=python3; fi
+# Prefer the private environment that install.sh --deps creates. Kokoro (voice) needs Python 3.12.
+if [ -x "$APP_DIR/.venv/bin/python" ]; then
+    PY="$APP_DIR/.venv/bin/python"
+elif command -v python3.12 >/dev/null 2>&1; then
+    PY=python3.12
+else
+    PY=python3
+fi
 
 if ! "$PY" -c "import streamlit" >/dev/null 2>&1; then
-    say "Streamlit isn't installed for $PY. Run: $APP_DIR/install.sh --deps"
+    say "The Python packages aren't installed yet. Open a terminal in $APP_DIR and run: ./install.sh --deps"
     exit 1
 fi
 

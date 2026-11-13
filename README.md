@@ -17,7 +17,7 @@ Everything runs on your own machine. Prompts and recordings never leave it.
 ```bash
 git clone https://github.com/Zeki46t/Local-LLM-Sandbox.git
 cd Local-LLM-Sandbox
-./install.sh --deps      # installs the packages (skip --deps if you already did the manual install below)
+./install.sh --deps      # installs system packages and a private Python environment (.venv). Works on Pop!_OS, Ubuntu, Debian and Fedora
 ```
 
 This adds **Local LLM Sandbox** to your app menu. Press the Super key, type "Local LLM", and click it. The launcher starts Ollama if it isn't running, starts the sandbox, and opens it in its own window (Chrome, Chromium, Brave or Edge) or your default browser. Clicking it again while it's running just reopens the window.
@@ -67,19 +67,27 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install kokoro
 ```
 
-## Install on Ubuntu / Debian
+## Install on Ubuntu / Debian / Pop!_OS
+
+The easiest way is `./install.sh --deps` (see the quick start). It uses a virtual environment because newer Ubuntu and Pop!_OS releases block system-wide `pip install` ("externally managed environment"). To do it by hand:
 
 ```bash
-sudo apt install espeak-ng python3.12 python3.12-venv
+sudo apt install espeak-ng python3.12 python3.12-venv ffmpeg build-essential
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/python -m pip install kokoro
 ```
 
-Then follow the virtual environment steps above.
+If your release has no `python3.12` package (Pop!_OS 22.04 and older), add the deadsnakes PPA first: `sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt update`.
 
 ## Run
 
 ```bash
 python3.12 -m streamlit run app.py --theme.base dark
 ```
+
+(If you made the `.venv` above, use `.venv/bin/python -m streamlit run app.py --theme.base dark` instead.)
 
 Streamlit opens at `http://localhost:8501`. Allow microphone access when the browser asks. The first transcription and the first voice reply each download a model once, then everything works offline.
 
@@ -151,3 +159,9 @@ Open `~/.cache/local-llm-sandbox/streamlit.log`. The most common cause is that t
 
 **"Stop app" closed the window but I want it back**
 Click Local LLM Sandbox in your app menu again. Your chats are saved, so reopen the one you want from the sidebar.
+
+**"The Python packages aren't installed yet" (or the app menu entry does nothing)**
+Run `./install.sh --deps` in the project folder. On Ubuntu and Pop!_OS this creates a `.venv` there, and `launch.sh` uses it automatically. If it says it can't install `python3.12`, add the deadsnakes PPA (see above).
+
+**`error: externally-managed-environment` from pip**
+Your system blocks system-wide installs. Use the `.venv` route (`./install.sh --deps`) instead of `pip install --user`.
