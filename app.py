@@ -13,7 +13,9 @@ import ollama
 from faster_whisper import WhisperModel
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Local Sandbox", page_icon="🤖", layout="wide")
+st.set_page_config(
+    page_title="Local Sandbox", page_icon="🤖", layout="wide", initial_sidebar_state="expanded"
+)
 
 TTS_SAMPLE_RATE = 24000
 TTS_VOICES = ["af_heart", "af_bella", "af_nicole", "bf_emma", "am_michael", "am_fenrir"]
@@ -30,9 +32,19 @@ st.markdown(
     }
 
     /* Hide Streamlit chrome */
-    #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"],
-    [data-testid="stStatusWidget"] {display: none !important;}
+    /* (the toolbar itself stays, because the button that re-opens the sidebar can live inside it) */
+    #MainMenu, footer, [data-testid="stDecoration"], [data-testid="stStatusWidget"],
+    [data-testid="stToolbarActions"], [data-testid="stMainMenu"], .stAppDeployButton {display: none !important;}
     [data-testid="stHeader"] {background: transparent;}
+
+    /* Always keep the "open sidebar" button visible and on top of the top bar */
+    [data-testid="stExpandSidebarButton"], [data-testid="stSidebarCollapsedControl"] {
+        display: flex !important; visibility: visible !important; opacity: 1 !important;
+        position: fixed; top: 14px; left: 14px; z-index: 1000001;
+    }
+    [data-testid="stExpandSidebarButton"] button, [data-testid="stSidebarCollapsedControl"] button {color: #d4d4d4;}
+    /* When the sidebar is collapsed, the top bar spans the full width and leaves room for that button */
+    .stApp:has([data-testid="stSidebar"][aria-expanded="false"]) .topbar {left: 0; padding-left: 64px;}
 
     /* Base */
     .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {background: var(--bg); color: var(--text);}
