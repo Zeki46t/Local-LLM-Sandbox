@@ -125,6 +125,30 @@ Chats are saved automatically after every reply and listed under **CHATS** in th
 | Voices | `TTS_VOICES` | Kokoro voice names |
 | British voices | `load_tts()` | `lang_code="b"` |
 
+## Performance and switching models
+
+Language models are heavy, and switching between them in one chat is the most demanding thing the app does. To keep your computer responsive, the app:
+
+- **Keeps one model in memory.** When you send a message with a different model selected, the previous model is unloaded first. A "Loading..." note shows while the new one starts, and the first reply after a switch is slower.
+- **Warns about low RAM.** If the model you picked probably won't fit in the memory that's free right now, you get a warning before it loads instead of a frozen computer.
+- **Leaves CPU cores free.** The **CPU threads** slider in the right panel defaults to all but two of your cores. Voice and transcription use about half.
+- **Sends less to the model.** Older messages that don't fit the **Context window** are left out (a note tells you), and only the most recent photo is re-sent, because vision models re-process images on every turn.
+- **Keeps the screen light.** Streaming replies refresh about 12 times a second instead of on every word, and the launcher turns off Streamlit's file watcher.
+- **Reads long replies in part.** Spoken replies stop at a sentence end near 1,000 characters. The full text is still on screen.
+
+If it still struggles, try a smaller model (3B or less, or a more compressed Q4 version), a smaller Context window, or fewer CPU threads. Switching models in a long chat is the slowest case, since the new model has to read the whole conversation again. **New chat** is faster.
+
+To make Ollama itself hold only one model at a time, even outside this app:
+
+```bash
+sudo systemctl edit ollama
+# add these two lines in the editor that opens, then save:
+#   [Service]
+#   Environment="OLLAMA_MAX_LOADED_MODELS=1"
+#   Environment="OLLAMA_NUM_PARALLEL=1"
+sudo systemctl restart ollama
+```
+
 ## Troubleshooting
 
 **`Failed to build 'spacy'` when installing Kokoro**

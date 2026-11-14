@@ -49,6 +49,7 @@ if ! healthy "$URL/_stcore/health"; then
         --server.headless true \
         --server.address 127.0.0.1 \
         --server.port "$PORT" \
+        --server.fileWatcherType none \
         --browser.gatherUsageStats false \
         --theme.base dark \
         >"$LOG_DIR/streamlit.log" 2>&1 &

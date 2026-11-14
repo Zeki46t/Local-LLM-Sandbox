@@ -8,6 +8,7 @@ import re
 import shutil
 import signal
 import subprocess
+import time
 import uuid
 import wave
 from datetime import datetime
@@ -37,6 +38,12 @@ DOC_EXTS = [
 ]
 UPLOAD_EXTS = IMAGE_EXTS + AUDIO_EXTS + DOC_EXTS
 CONTEXT_SIZES = [4096, 8192, 16384, 32768]
+
+# Performance: leave some cores free so the computer stays responsive while a model runs
+CPU_CORES = max(2, os.cpu_count() or 4)
+DEFAULT_THREADS = max(1, CPU_CORES - 2)
+TTS_MAX_CHARS = 1000        # spoken replies are cut at a sentence end near this length
+STREAM_UI_INTERVAL = 0.08   # seconds between on-screen updates while a reply streams
 
 # Saved chats live here (set LLM_SANDBOX_DATA to put them somewhere else)
 DATA_DIR = Path(os.environ.get("LLM_SANDBOX_DATA", Path.home() / ".local" / "share" / "local-llm-sandbox"))
@@ -251,6 +258,7 @@ def get_model_infos():
                 "params": field(det, "parameter_size") or "",
                 "quant": field(det, "quantization_level") or "",
                 "family": field(det, "family") or "",
+                "size": field(m, "size") or 0,
             })
         if infos:
             return infos
@@ -268,6 +276,7 @@ def get_model_infos():
                         "params": det.get("parameter_size", ""),
                         "quant": det.get("quantization_level", ""),
                         "family": det.get("family", ""),
+                        "size": m.get("size", 0),
                     })
     except Exception:
         pass
@@ -277,7 +286,7 @@ def get_model_infos():
 @st.cache_resource
 def load_whisper():
     # "base" is quick; use "small" for better accuracy, "tiny" for max speed
-    return WhisperModel("base", device="cpu", compute_type="int8")
+    return WhisperModel("base", device="cpu", compute_type="int8", cpu_threads=max(1, CPU_CORES // 2))
 
 
 def wav_to_float(raw):
@@ -378,7 +387,8 @@ def process_uploads(files, num_ctx):
     attachments, images, parts, errors = [], [], [], []
     text_files = [f for f in files if file_ext(f.name) not in IMAGE_EXTS]
     # Roughly 2.5 characters per token, spread across the text-based files
-    per_file = max(2000, int(num_ctx * 2.5) // max(1, len(text_files)))
+    # Keep attachments to ~60% of the window so there's room for the chat and the reply
+    per_file = max(2000, int(num_ctx * 2.5 * 0.6) // max(1, len(text_files)))
     for f in files:
         raw = f.getvalue()
         ext = file_ext(f.name)
@@ -420,7 +430,9 @@ def has_vision(model_name):
 @st.cache_resource
 def load_tts():
     # Imported here so the app still runs if Kokoro isn't installed
+    import torch
     from kokoro import KPipeline
+    torch.set_num_threads(max(1, CPU_CORES // 2))  # leave cores for the language model and the system
     return KPipeline(lang_code="a")  # "a" = American English; use "b" for British voices
 
 
@@ -439,6 +451,11 @@ def synthesize(text, voice):
     text = clean_for_speech(text)
     if not text:
         return None
+    if len(text) > TTS_MAX_CHARS:
+        # Speaking a very long reply keeps the CPU pegged, so read the opening and stop at a sentence end
+        cut = text[:TTS_MAX_CHARS]
+        end = max(cut.rfind(". "), cut.rfind("? "), cut.rfind("! "))
+        text = cut[: end + 1] if end > 200 else cut
     pipeline = load_tts()
     chunks = [np.asarray(audio, dtype=np.float32) for _, _, audio in pipeline(text, voice=voice)]
     if not chunks:
@@ -522,6 +539,79 @@ def delete_model(name):
     except Exception as e:
         st.session_state.flash = f"Couldn't delete {name}: {e}"
     st.session_state.delete_confirm = False
+
+
+# --- PERFORMANCE HELPERS START ---
+def unload_other_models(active_name):
+    """Keep only the active model in memory.
+    Returns (names unloaded, whether the active model was already loaded)."""
+    unloaded, was_loaded = [], False
+    try:
+        for m in field(ollama.ps(), "models") or []:
+            name = field(m, "model") or field(m, "name")
+            if not name:
+                continue
+            if name == active_name:
+                was_loaded = True
+            else:
+                try:
+                    ollama.generate(model=name, prompt="", keep_alive=0)
+                    unloaded.append(name)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return unloaded, was_loaded
+
+
+def free_ram_gb():
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024 / 1024
+    except Exception:
+        pass
+    return None
+
+
+def ram_warning(model_name, size_bytes):
+    """A heads-up if the model probably won't fit in the RAM that's free right now."""
+    if not size_bytes:
+        return None
+    free = free_ram_gb()
+    need = size_bytes / 1e9 * 1.2 + 0.5
+    if free is not None and free < need:
+        return (
+            f"Only {free:.1f} GB of RAM is free and {model_name} needs roughly {need:.1f} GB. "
+            "Your computer may slow down or freeze while it loads. Close other apps or pick a smaller model."
+        )
+    return None
+
+
+def build_history(messages, vision_ok, num_ctx):
+    """Chat history for the model: newest messages that fit the window, and photos only from the latest
+    message that has them. Returns (history, number of older messages left out)."""
+    last_img = max((i for i, m in enumerate(messages) if m.get("images")), default=-1)
+    entries = []
+    for i, m in enumerate(messages):
+        e = {"role": m["role"], "content": m.get("model_content", m["content"])}
+        if vision_ok and i == last_img:
+            e["images"] = m["images"]
+        entries.append(e)
+    budget = int(num_ctx * 2.5 * 0.65)  # leave room for the system prompt and the reply
+    kept, used = [], 0
+    for e in reversed(entries):
+        size = len(e["content"])
+        if kept and used + size > budget:
+            break
+        kept.append(e)
+        used += size
+    kept.reverse()
+    while len(kept) > 1 and kept[0]["role"] != "user":
+        kept.pop(0)
+    return kept, len(entries) - len(kept)
+# --- PERFORMANCE HELPERS END ---
 
 
 # --- SAVED CHATS (HISTORY START) ---
@@ -851,6 +941,16 @@ with st.container(key="infopanel"):
         help="How much text the model can see at once. Larger values fit bigger attached files but use more memory.",
     )
 
+    st.markdown('<div class="mi-label sec">CPU THREADS</div>', unsafe_allow_html=True)
+    num_threads = st.slider(
+        "CPU threads",
+        1,
+        CPU_CORES,
+        DEFAULT_THREADS,
+        label_visibility="collapsed",
+        help="How many CPU cores the model may use. Leaving a couple free keeps the rest of your computer responsive.",
+    )
+
     st.markdown('<div class="mi-label sec">HISTORY</div>', unsafe_allow_html=True)
     st.toggle(
         "Save chats on this computer",
@@ -1002,26 +1102,47 @@ if prompt or uploads:
         arow = st.container(key=f"arow-{idx + 1}")
         with arow:
             st.markdown(f'<div class="lbl-ai">{model_label(active)}</div>', unsafe_allow_html=True)
+            note_slot = st.empty()
             response_placeholder = st.empty()
 
         full_response = ""
         try:
-            history = []
-            for m in st.session_state.messages:
-                entry = {"role": m["role"], "content": m.get("model_content", m["content"])}
-                if m.get("images") and vision_ok:
-                    entry["images"] = m["images"]
-                history.append(entry)
+            # Keep only one model in memory: two at once is what exhausts RAM and freezes the system
+            unloaded, was_loaded = unload_other_models(active)
+            if unloaded:
+                st.toast(f"Unloaded {', '.join(unloaded)} to free memory")
+            if not was_loaded:
+                response_placeholder.caption(
+                    f"Loading {active}... the first reply after switching models is slower."
+                )
+
+            history, dropped = build_history(st.session_state.messages, vision_ok, num_ctx)
+            notes = []
+            if not was_loaded:
+                warn = ram_warning(active, active_info.get("size", 0))
+                if warn:
+                    notes.append(("warning", warn))
+            if dropped:
+                notes.append(("caption", f"{dropped} older message(s) were left out to fit the context window."))
+            if notes:
+                with note_slot.container():
+                    for kind, msg in notes:
+                        getattr(st, kind)(msg)
+
             chat_messages = [{"role": "system", "content": system_prompt}] + history
             stream = ollama.chat(
                 model=active,
                 messages=chat_messages,
                 stream=True,
-                options={"num_ctx": num_ctx},
+                options={"num_ctx": num_ctx, "num_thread": num_threads},
             )
+            last_ui = 0.0
             for chunk in stream:
                 full_response += chunk['message']['content']
-                response_placeholder.markdown(full_response + "▌")
+                now = time.monotonic()
+                if now - last_ui >= STREAM_UI_INTERVAL:
+                    response_placeholder.markdown(full_response + "▌")
+                    last_ui = now
             response_placeholder.markdown(full_response)
             st.session_state.messages.append(
                 {"role": "assistant", "content": full_response, "model": active}
