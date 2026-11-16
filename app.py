@@ -8,6 +8,7 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import time
 import uuid
 import wave
@@ -20,6 +21,11 @@ import streamlit as st
 import streamlit.components.v1 as components
 import ollama
 from faster_whisper import WhisperModel
+
+try:  # lets the background voice loader use Streamlit's cache without warnings
+    from streamlit.runtime.scriptrunner import add_script_run_ctx
+except Exception:
+    add_script_run_ctx = None
 
 # --- CONFIGURATION ---
 st.set_page_config(
@@ -76,6 +82,15 @@ st.markdown(
     [data-testid="stExpandSidebarButton"] button, [data-testid="stSidebarCollapsedControl"] button {color: #d4d4d4;}
     /* When the sidebar is collapsed, the top bar spans the full width and leaves room for that button */
     .stApp:has([data-testid="stSidebar"][aria-expanded="false"]) .topbar {left: 0; padding-left: 64px;}
+
+    /* When the sidebar closes, the chat stays centered and widens into the freed space (and eases back when it opens) */
+    .topbar, .st-key-center, [data-testid="stBottomBlockContainer"] {
+        transition: left 0.25s ease, padding 0.25s ease, max-width 0.25s ease;
+    }
+    .stApp:has([data-testid="stSidebar"][aria-expanded="false"]) .st-key-center,
+    .stApp:has([data-testid="stSidebar"][aria-expanded="false"]) [data-testid="stBottomBlockContainer"] {
+        max-width: 1080px;
+    }
 
     /* Base */
     .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {background: var(--bg); color: var(--text);}
@@ -479,6 +494,49 @@ def play_hidden(wav_bytes):
     )
 
 
+# --- VOICE PRELOAD START ---
+def _warm_up_voice(state):
+    """Load speech-to-text and text-to-speech ahead of time, then run each once so the first real use is fast."""
+    try:
+        model = load_whisper()
+        list(model.transcribe(np.zeros(16000, dtype=np.float32))[0])  # one second of silence
+        state["stt"] = True
+    except Exception as e:
+        state["stt_error"] = str(e)
+    try:
+        pipeline = load_tts()
+        for voice in TTS_VOICES:  # fetch and keep every voice ready, so switching voices is instant too
+            try:
+                pipeline.load_voice(voice)
+            except Exception:
+                pass
+        for _ in pipeline("Ready.", voice=TTS_VOICES[0]):
+            pass
+        state["tts"] = True
+    except Exception as e:
+        state["tts_error"] = str(e)
+    state["done"] = True
+
+
+@st.cache_resource
+def start_voice_preload():
+    """Start loading the voice models in the background, once per app launch.
+    Set LLM_SANDBOX_PRELOAD=0 to skip this (saves about 1 GB of RAM until voice is first used)."""
+    state = {"done": False}
+    if os.environ.get("LLM_SANDBOX_PRELOAD", "1") == "0":
+        state["done"] = True
+        return state
+    thread = threading.Thread(target=_warm_up_voice, args=(state,), daemon=True, name="voice-preload")
+    if add_script_run_ctx:
+        try:
+            add_script_run_ctx(thread)
+        except Exception:
+            pass
+    thread.start()
+    return state
+# --- VOICE PRELOAD END ---
+
+
 def esc(text):
     return htmllib.escape(str(text))
 
@@ -791,6 +849,9 @@ def render_chat_list(slot, tag):
                 st.button("✕", key=f"chatdel-{cid}-{tag}", on_click=delete_chat, args=(cid,), help="Delete this chat")
 # --- SAVED CHATS (HISTORY END) ---
 
+
+# Start loading the voice models in the background so the first spoken reply isn't slow
+start_voice_preload()
 
 # --- SESSION STATE ---
 if "chat_id" not in st.session_state:

@@ -94,6 +94,7 @@ Streamlit opens at `http://localhost:8501`. Allow microphone access when the bro
 ## Using it
 
 - Click a model in the left sidebar to switch to it.
+- Close the left sidebar (the arrow at its edge) and the chat stays centered and widens into the freed space; open it again and it eases back.
 - Open **Manage models** in the sidebar to install or delete models:
   - **Install:** type a model name such as `llama3.2:3b` and click Install. A progress bar shows the download. Names are listed at [ollama.com/library](https://ollama.com/library). Keep the tab open until it finishes, since clicking elsewhere interrupts the download.
   - **Delete:** pick a model, tick the confirmation box, and click Delete.
@@ -134,6 +135,7 @@ Language models are heavy, and switching between them in one chat is the most de
 - **Leaves CPU cores free.** The **CPU threads** slider in the right panel defaults to all but two of your cores. Voice and transcription use about half.
 - **Sends less to the model.** Older messages that don't fit the **Context window** are left out (a note tells you), and only the most recent photo is re-sent, because vision models re-process images on every turn.
 - **Keeps the screen light.** Streaming replies refresh about 12 times a second instead of on every word, and the launcher turns off Streamlit's file watcher.
+- **Preloads the voice models.** Speech-to-text (Whisper) and text-to-speech (Kokoro, with all voices) start loading in the background as soon as the app opens, so the first spoken reply doesn't wait on them. This uses roughly 1 GB of RAM from the start. To skip it and load voice only when first needed, set `LLM_SANDBOX_PRELOAD=0` before launching.
 - **Reads long replies in part.** Spoken replies stop at a sentence end near 1,000 characters. The full text is still on screen.
 
 If it still struggles, try a smaller model (3B or less, or a more compressed Q4 version), a smaller Context window, or fewer CPU threads. Switching models in a long chat is the slowest case, since the new model has to read the whole conversation again. **New chat** is faster.
