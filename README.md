@@ -106,6 +106,7 @@ Streamlit opens at `http://localhost:8501`. Allow microphone access when the bro
   - **Photos** (png, jpg, webp, gif): sent to the model as images. This only works with a vision model, such as `llama3.2-vision`, `gemma3` or `qwen2.5vl`. The right panel shows whether the active model supports images.
 - Big files are trimmed to fit the **Context window** setting in the right panel. Raise it to fit more, at the cost of memory.
 - Use the right panel to turn spoken replies on or off, pick a voice, replay the last reply, or edit the system prompt.
+- While a reply is being spoken, a **⏹ Stop voice** button floats near the bottom right of the chat. Click it to stop and rewind. Each reply is spoken once, and sending a new prompt never restarts the previous one.
 - **New chat** starts a fresh conversation.
 
 ## Saved chats

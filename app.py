@@ -485,13 +485,65 @@ def synthesize(text, voice):
     return buf.getvalue()
 
 
+# --- AUDIO PLAYER START ---
+# One shared player lives on the page itself, not inside a Streamlit element, and all of its code runs in the
+# page (not in the short-lived frame Streamlit builds for each call), so it keeps working after Streamlit
+# rebuilds or removes that frame. Each clip carries a unique token and plays at most once, so redrawing the
+# page for the next prompt can never start an old reply again. While audio plays, a "Stop voice" button
+# floats near the bottom right.
+PLAYER_JS = """<script>
+(function () {
+  var token = "__TOKEN__", src = "data:audio/wav;base64,__B64__";
+
+  // Runs inside the page via a <script> element, so its handlers outlive this frame.
+  function install() {
+    var a = document.createElement("audio");
+    a.id = "sandbox-audio";
+    document.body.appendChild(a);
+    var btn = document.createElement("button");
+    btn.id = "sandbox-stop";
+    btn.type = "button";
+    btn.textContent = "⏹  Stop voice";
+    btn.style.cssText = "display:none;position:fixed;right:304px;bottom:108px;z-index:1000002;" +
+      "padding:9px 16px;border-radius:999px;border:1px solid #a78bfa;background:#161616;color:#ededed;" +
+      "font:600 13px system-ui,sans-serif;cursor:pointer;box-shadow:0 4px 18px rgba(0,0,0,.55);";
+    document.body.appendChild(btn);
+    var show = function () { btn.style.display = "block"; };
+    var hide = function () { btn.style.display = "none"; };
+    ["play", "playing"].forEach(function (n) { a.addEventListener(n, show); });
+    ["pause", "ended", "error"].forEach(function (n) { a.addEventListener(n, hide); });
+    btn.addEventListener("click", function () { a.pause(); a.currentTime = 0; hide(); });
+    window.__sbPlay = function (t, s) {
+      var seen = window.__sbSeen || (window.__sbSeen = {});
+      if (seen[t]) { return; }   // already played: a redraw must never replay it, however late it arrives
+      seen[t] = 1;
+      a.src = s;
+      var started = a.play();
+      if (started && started.catch) { started.catch(hide); }
+    };
+  }
+
+  var W;
+  try { W = window.parent; void W.document; } catch (e) { W = null; }
+  if (W) {
+    if (!W.__sbPlay) {
+      var el = W.document.createElement("script");
+      el.textContent = "(" + install.toString() + ")();";
+      W.document.head.appendChild(el);
+    }
+    if (W.__sbPlay) { W.__sbPlay(token, src); return; }
+  }
+  new Audio(src).play().catch(function () {});   // page not reachable: just play it here
+})();
+</script>"""
+
+
 def play_hidden(wav_bytes):
-    """Autoplay audio with no visible player."""
+    """Play audio through the shared player (no visible player; a Stop button shows while it plays)."""
     b64 = base64.b64encode(wav_bytes).decode()
-    components.html(
-        f'<audio autoplay><source src="data:audio/wav;base64,{b64}" type="audio/wav"></audio>',
-        height=0,
-    )
+    html = PLAYER_JS.replace("__TOKEN__", uuid.uuid4().hex).replace("__B64__", b64)
+    components.html(html, height=0)
+# --- AUDIO PLAYER END ---
 
 
 # --- VOICE PRELOAD START ---
